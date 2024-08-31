@@ -18,19 +18,20 @@ internal class ScheduledJobRunner
     private readonly ScheduledJobOptions _jobOptions;
     private readonly IServiceProvider _serviceProvider;
     private readonly ICacheClient _cacheClient;
-    private readonly ISystemClock _systemClock;
+    private readonly TimeProvider _timeProvider;
     private CronExpression _cronSchedule;
     private readonly ILockProvider _lockProvider;
     private readonly ILogger _logger;
     private readonly DateTime _baseDate = new(2010, 1, 1);
     private bool _lastRunChecked = false;
+    private DateTime _lastStatusUpdate = DateTime.MinValue;
 
     public ScheduledJobRunner(ScheduledJobOptions jobOptions, IServiceProvider serviceProvider, ICacheClient cacheClient, ILoggerFactory loggerFactory = null)
     {
         _jobOptions = jobOptions;
         _jobOptions.Name ??= Guid.NewGuid().ToString("N").Substring(0, 10);
         _serviceProvider = serviceProvider;
-        _systemClock = serviceProvider.GetService<ISystemClock>() ?? SystemClock.Instance;
+        _timeProvider = serviceProvider.GetService<TimeProvider>() ?? TimeProvider.System;
         _cacheClient = new ScopedCacheClient(cacheClient, "jobs");
         _logger = loggerFactory?.CreateLogger<ScheduledJobRunner>() ?? NullLogger<ScheduledJobRunner>.Instance;
 
@@ -40,7 +41,7 @@ internal class ScheduledJobRunner
 
         var interval = TimeSpan.FromDays(1);
 
-        var nextOccurrence = _cronSchedule.GetNextOccurrence(_systemClock.UtcNow());
+        var nextOccurrence = _cronSchedule.GetNextOccurrence(_timeProvider.GetUtcNow().UtcDateTime);
         if (nextOccurrence.HasValue)
         {
             var nextNextOccurrence = _cronSchedule.GetNextOccurrence(nextOccurrence.Value);
@@ -50,7 +51,7 @@ internal class ScheduledJobRunner
 
         _lockProvider = new ThrottlingLockProvider(_cacheClient, 1, interval.Add(interval));
 
-        NextRun = _cronSchedule.GetNextOccurrence(_systemClock.UtcNow());
+        NextRun = _cronSchedule.GetNextOccurrence(_timeProvider.GetUtcNow().UtcDateTime);
     }
 
     public ScheduledJobOptions Options => _jobOptions;
@@ -62,17 +63,20 @@ internal class ScheduledJobRunner
         set
         {
             _cronSchedule = CronExpression.Parse(value);
-            NextRun = _cronSchedule.GetNextOccurrence(_systemClock.UtcNow());
+            NextRun = _cronSchedule.GetNextOccurrence(_timeProvider.GetUtcNow().UtcDateTime);
             _schedule = value;
         }
     }
 
     public DateTime? LastRun { get; private set; }
+    public DateTime? LastSuccess { get; private set; }
+    public string LastErrorMessage { get; private set; }
     public DateTime? NextRun { get; private set; }
     public Task RunTask { get; private set; }
 
     public async ValueTask<bool> ShouldRunAsync()
     {
+        // get initial last run value
         if (!_lastRunChecked && !LastRun.HasValue) {
             var lastRun = await _cacheClient.GetAsync<DateTime>("lastrun:" + Options.Name).AnyContext();
             if (lastRun.HasValue)
@@ -83,11 +87,31 @@ internal class ScheduledJobRunner
             _lastRunChecked = true;
         }
 
+        if (_timeProvider.GetUtcNow().UtcDateTime.Subtract(_lastStatusUpdate).TotalSeconds > 15)
+        {
+            var lastRun = await _cacheClient.GetAsync<DateTime>("lastrun:" + Options.Name).AnyContext();
+            if (lastRun.HasValue)
+            {
+                LastRun = lastRun.Value;
+                NextRun = _cronSchedule.GetNextOccurrence(LastRun.Value);
+            }
+
+            var lastSuccess = await _cacheClient.GetAsync<DateTime>("lastsuccess:" + Options.Name).AnyContext();
+            if (lastSuccess.HasValue)
+                LastSuccess = lastSuccess.Value;
+
+            var lastError = await _cacheClient.GetAsync<string>("lasterror:" + Options.Name).AnyContext();
+            if (lastError.HasValue)
+                LastErrorMessage = lastError.Value;
+
+            _lastStatusUpdate = _timeProvider.GetUtcNow().UtcDateTime;
+        }
+
         if (!NextRun.HasValue)
             return false;
 
         // not time yet
-        if (NextRun > _systemClock.UtcNow())
+        if (NextRun > _timeProvider.GetUtcNow().UtcDateTime)
             return false;
 
         // check if already run
@@ -111,6 +135,14 @@ internal class ScheduledJobRunner
                 if (lastRun.HasValue)
                     LastRun = lastRun.Value;
 
+                var lastSuccess = await _cacheClient.GetAsync<DateTime>("lastsuccess:" + Options.Name).AnyContext();
+                if (lastSuccess.HasValue)
+                    LastSuccess = lastSuccess.Value;
+
+                var lastError = await _cacheClient.GetAsync<string>("lasterror:" + Options.Name).AnyContext();
+                if (lastError.HasValue)
+                    LastErrorMessage = lastError.Value;
+
                 return;
             }
         }
@@ -124,11 +156,20 @@ internal class ScheduledJobRunner
 
                 var result = await Options.JobFactory(_serviceProvider).TryRunAsync(cancellationToken).AnyContext();
                 _logger.LogJobResult(result, Options.Name);
+                if (result.IsSuccess)
+                {
+                    LastSuccess = _timeProvider.GetUtcNow().UtcDateTime;
+                    await _cacheClient.SetAsync("lastsuccess:" + Options.Name, LastSuccess.Value).AnyContext();
+                }
+                else
+                {
+                    LastErrorMessage = result.Message;
+                    await _cacheClient.SetAsync("lasterror:" + Options.Name, LastErrorMessage).AnyContext();
+                }
             }, cancellationToken).Unwrap();
 
             LastRun = NextRun;
-            if (Options.IsDistributed)
-                await _cacheClient.SetAsync("lastrun:" + Options.Name, LastRun.Value).AnyContext();
+            await _cacheClient.SetAsync("lastrun:" + Options.Name, LastRun.Value).AnyContext();
             NextRun = _cronSchedule.GetNextOccurrence(LastRun.Value);
         }
     }

@@ -2,7 +2,6 @@
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Foundatio.Extensions.Hosting.Startup;
 using Foundatio.Jobs;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -186,11 +185,11 @@ public static class JobHostExtensions
         if (!services.Any(s => s.ServiceType == typeof(IHostedService) && s.ImplementationType == typeof(ScheduledJobService)))
             services.AddTransient<IHostedService, ScheduledJobService>();
 
-        if (!services.Any(s => s.ServiceType == typeof(ScheduledJobManager) && s.ImplementationType == typeof(ScheduledJobManager)))
-            services.AddSingleton<ScheduledJobManager>();
+        if (!services.Any(s => s.ServiceType == typeof(JobManager) && s.ImplementationType == typeof(JobManager)))
+            services.AddSingleton<JobManager>();
 
-        if (!services.Any(s => s.ServiceType == typeof(IScheduledJobManager) && s.ImplementationType == typeof(ScheduledJobManager)))
-            services.AddSingleton<IScheduledJobManager>(sp => sp.GetRequiredService<ScheduledJobManager>());
+        if (!services.Any(s => s.ServiceType == typeof(IJobManager) && s.ImplementationType == typeof(JobManager)))
+            services.AddSingleton<IJobManager>(sp => sp.GetRequiredService<JobManager>());
 
         return services;
     }

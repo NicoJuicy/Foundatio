@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundatio.Extensions.Hosting.Startup;
@@ -9,21 +8,16 @@ using Microsoft.Extensions.Hosting;
 
 namespace Foundatio.Extensions.Hosting.Jobs;
 
-public class ScheduledJobService : BackgroundService, IJobStatus
+public class ScheduledJobService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
-    private readonly ScheduledJobManager _jobManager;
+    private readonly JobManager _jobManager;
 
-    public ScheduledJobService(IServiceProvider serviceProvider, ScheduledJobManager jobManager)
+    public ScheduledJobService(IServiceProvider serviceProvider, JobManager jobManager)
     {
         _serviceProvider = serviceProvider;
         _jobManager = jobManager;
-
-        var lifetime = serviceProvider.GetService<ShutdownHostIfNoJobsRunningService>();
-        lifetime?.RegisterHostedJobInstance(this);
     }
-
-    public bool IsRunning { get; private set; } = true;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -33,7 +27,6 @@ public class ScheduledJobService : BackgroundService, IJobStatus
             var result = await startupContext.WaitForStartupAsync(stoppingToken).AnyContext();
             if (!result.Success)
             {
-                IsRunning = false;
                 throw new ApplicationException("Failed to wait for startup actions to complete");
             }
         }
